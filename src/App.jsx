@@ -2,11 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import Webcam from 'react-webcam';
 import { listSites, listUsers, uploadSelfie, insertEvent, getLastEvent } from './api';
 
-// ORG por URL (?org=DIMEO) con fallback a DIMEO
+// ORG via URL (?org=DIMEO), fallback to DIMEO
 const query = new URLSearchParams(window.location.search);
 const orgId = (query.get('org') || 'DIMEO').trim();
 
-// Distancia Haversine (m)
+// Haversine distance (m)
 function haversineMeters(a, b) {
   const toRad = (x) => (x * Math.PI) / 180, R = 6371000;
   const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
@@ -22,13 +22,14 @@ export default function App() {
   const [site, setSite] = useState(null);
   const [distance, setDistance] = useState(null);
 
+  const [nameInput, setNameInput] = useState('');
   const [selectedUser, setSelectedUser] = useState(null);
-  const [nameInput, setNameInput] = useState("");
 
   const [photo, setPhoto] = useState(null);
+  const [busy, setBusy] = useState(false);
   const webcamRef = useRef(null);
 
-  // 1) Cargar sedes y usuarios por ORG
+  // 1) Load sites and users (by org)
   useEffect(() => {
     (async () => {
       setSites(await listSites(orgId));
@@ -36,7 +37,7 @@ export default function App() {
     })();
   }, [orgId]);
 
-  // 2) GPS + elegir sede dentro de radio automáticamente
+  // 2) GPS + auto-pick nearest site within radius
   useEffect(() => {
     if (!navigator.geolocation) return;
     const watchId = navigator.geolocation.watchPosition(
@@ -48,6 +49,7 @@ export default function App() {
             const d = Math.round(haversineMeters(loc, { lat: s.lat, lng: s.lng }));
             return { ...s, _dist: d };
           }).sort((a,b) => a._dist - b._dist);
+
           const candidate = ranked[0];
           if (candidate && candidate._dist <= candidate.radius_m) {
             setSite(candidate);
@@ -58,74 +60,97 @@ export default function App() {
           }
         }
       },
-      (err) => console.error('GPS error', err),
+      (err) => console.error('Geolocation error', err),
       { enableHighAccuracy: true }
     );
     return () => navigator.geolocation.clearWatch(watchId);
   }, [sites]);
 
-  // 3) Tomar selfie
+  // 3) Take selfie
   const takePhoto = () => {
     const imageSrc = webcamRef.current?.getScreenshot();
-    if (!imageSrc) return alert('No se pudo capturar la selfie.');
+    if (!imageSrc) return alert('Could not capture the selfie. Please allow camera access.');
     setPhoto(imageSrc);
   };
 
-  // 4) Confirmar (alterna IN/OUT)
+  // 4) Confirm (toggle IN/OUT)
   const confirm = async () => {
-    if (!site) return alert('Debes estar dentro de la sede para registrar.');
-    if (!selectedUser) return alert('Selecciona tu nombre.');
-    if (!photo) return alert('La selfie es obligatoria.');
+    if (!site) return alert('You must be inside a site geofence to register.');
+    if (!selectedUser) return alert('Please select your name.');
+    if (!photo) return alert('Selfie is required.');
 
-    const blob = await fetch(photo).then(r => r.blob());
-    const selfieUrl = await uploadSelfie(blob, orgId, selectedUser.id);
-    const last = await getLastEvent(orgId, selectedUser.id, site.id);
-    const type = last && last.type === 'check-in' ? 'check-out' : 'check-in';
+    try {
+      setBusy(true);
+      const blob = await fetch(photo).then(r => r.blob());
+      const selfieUrl = await uploadSelfie(blob, orgId, selectedUser.id);
+      const last = await getLastEvent(orgId, selectedUser.id, site.id);
+      const type = last && last.type === 'check-in' ? 'check-out' : 'check-in';
 
-    await insertEvent({
-      org_id: orgId,
-      site_id: site.id,
-      user_id: selectedUser.id,
-      type,
-      lat: gps?.lat ?? null,
-      lng: gps?.lng ?? null,
-      distance_m: distance ?? null,
-      selfie_url: selfieUrl
-    });
+      await insertEvent({
+        org_id: orgId,
+        site_id: site.id,
+        user_id: selectedUser.id,
+        type,
+        lat: gps?.lat ?? null,
+        lng: gps?.lng ?? null,
+        distance_m: distance ?? null,
+        selfie_url: selfieUrl
+      });
 
-    alert(`✅ ${type.toUpperCase()} en ${site.name}`);
-    // reset para próximo uso
-    setNameInput("");
-    setSelectedUser(null);
-    setPhoto(null);
+      alert(`✅ ${type.toUpperCase()} at ${site.name}`);
+      // reset
+      setNameInput('');
+      setSelectedUser(null);
+      setPhoto(null);
+    } catch (e) {
+      console.error(e);
+      alert('Something went wrong. Please try again.');
+    } finally {
+      setBusy(false);
+    }
   };
 
-  // Render
   const usersFiltered = users.filter(u =>
     u.name.toLowerCase().includes(nameInput.toLowerCase())
   );
 
   return (
-    <div style={{ fontFamily:'system-ui, sans-serif', padding:20, maxWidth:520, margin:'0 auto' }}>
-      <h2 style={{ marginBottom:8 }}>DIMEO – Check‑in / Check‑out</h2>
-      <div style={{ fontSize:13, color:'#555' }}>
-        Usa este enlace desde el QR impreso. Permití cámara y ubicación.
-      </div>
+    <div className="container">
+      <header className="topbar">
+        <div className="brand">DIMEO</div>
+        <div className="subtitle">Check‑in / Check‑out</div>
+      </header>
 
-      <div style={{ marginTop:16, padding:12, border:'1px solid #eee', borderRadius:10 }}>
-        <div style={{ fontSize:14 }}>
-          Org: <b>{orgId}</b><br/>
-          {gps && <>Mi GPS: {gps.lat.toFixed(6)}, {gps.lng.toFixed(6)}<br/></>}
-          Sede: {site
-            ? <b>{site.name} — {distance} m</b>
-            : <span style={{ color:'#b00' }}>Fuera de sede
-                {distance!=null ? ` (la más cercana a ${distance} m)` : ''}</span>}
+      <section className="card">
+        <div className="muted">
+          Use your phone to open this page (scan the printed QR). Please allow camera and location.
         </div>
-      </div>
+        <div className="grid2">
+          <div>
+            <div className="label">Organization</div>
+            <div className="value">{orgId}</div>
+          </div>
+          <div>
+            <div className="label">Site</div>
+            <div className="value">
+              {site ? (
+                <b>{site.name} — {distance} m</b>
+              ) : (
+                <span className="warn">
+                  Outside geofence{distance!=null ? ` (nearest ~${distance} m)` : ''}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+        {gps && (
+          <div className="gps">My location: {gps.lat.toFixed(6)}, {gps.lng.toFixed(6)}</div>
+        )}
+      </section>
 
-      {/* Paso 1: Usuario */}
-      <div style={{ marginTop:16 }}>
-        <label style={{ fontSize:14 }}>Tu nombre</label>
+      {/* Step 1: User */}
+      <section className="card">
+        <div className="label">Your name</div>
         <input
           value={nameInput}
           onChange={(e) => {
@@ -134,25 +159,22 @@ export default function App() {
             const match = users.find(u => u.name.toLowerCase() === val.toLowerCase());
             setSelectedUser(match || null);
           }}
-          placeholder="Empieza a escribir…"
-          style={{ width:'100%', padding:10, border:'1px solid #ccc', borderRadius:8, marginTop:6 }}
+          placeholder="Start typing…"
           list="user-suggestions"
         />
         <datalist id="user-suggestions">
-          {usersFiltered.slice(0,20).map(u => (
+          {usersFiltered.slice(0, 20).map(u => (
             <option key={u.id} value={u.name} />
           ))}
         </datalist>
         {!selectedUser && nameInput && (
-          <div style={{ marginTop:6, fontSize:12, color:'#555' }}>
-            Selecciona tu nombre de la lista.
-          </div>
+          <div className="hint">Pick your name from the list.</div>
         )}
-      </div>
+      </section>
 
-      {/* Paso 2: Selfie */}
-      <div style={{ marginTop:16 }}>
-        <div style={{ fontSize:14, marginBottom:6 }}>Selfie (obligatoria)</div>
+      {/* Step 2: Selfie */}
+      <section className="card">
+        <div className="label">Selfie (required)</div>
         {!photo ? (
           <>
             <Webcam
@@ -161,33 +183,31 @@ export default function App() {
               screenshotFormat="image/jpeg"
               width="100%"
               videoConstraints={{ facingMode: 'user' }}
+              className="webcam"
             />
-            <button onClick={takePhoto} style={{ marginTop:8, padding:10, border:'1px solid #ccc', borderRadius:8, width:'100%' }}>
-              📸 Tomar selfie
-            </button>
+            <button className="btn" onClick={takePhoto}>📸 Take selfie</button>
           </>
         ) : (
           <>
-            <img src={photo} alt="selfie" style={{ width:'100%', borderRadius:8 }} />
-            <div style={{ display:'flex', gap:8, marginTop:8 }}>
-              <button onClick={() => setPhoto(null)} style={{ flex:1, padding:10, border:'1px solid #ccc', borderRadius:8 }}>
-                Repetir
-              </button>
-              <button onClick={confirm} style={{ flex:1, padding:10, border:'1px solid #0a0', color:'#0a0', borderRadius:8 }}>
-                Confirmar
+            <img src={photo} alt="selfie" className="shot" />
+            <div className="actions">
+              <button className="btn secondary" onClick={() => setPhoto(null)}>Retake</button>
+              <button className="btn primary" onClick={confirm} disabled={busy}>
+                {busy ? 'Saving…' : 'Confirm'}
               </button>
             </div>
           </>
         )}
-      </div>
+        {!site && (
+          <div className="hint warn">
+            You must be inside the site range to Sign In / Out.
+          </div>
+        )}
+      </section>
 
-      {/* Nota de validación */}
-      {!site && (
-        <div style={{ marginTop:12, fontSize:12, color:'#b00' }}>
-          Debes estar dentro del radio de una sede para registrar.
-          Si estás en el lugar y no te detecta, amplía temporalmente <code>radius_m</code> en Supabase.
-        </div>
-      )}
+      <footer className="foot">
+        © DIMEO
+      </footer>
     </div>
   );
 }
